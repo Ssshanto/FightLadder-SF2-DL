@@ -2,9 +2,10 @@ import multiprocessing as mp
 from collections import OrderedDict
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Type, Union, Dict
 
-import gym
+import gymnasium as gym
 import numpy as np
-from gym import spaces
+from gymnasium import spaces
+import stable_retro as retro
 
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.utils import get_linear_fn
@@ -39,7 +40,7 @@ def select_1p_character(character, state):
     else:
         raise ValueError('State must be Champion.Select1P.Left or Champion.Select1P.Right')
     env = retro.make(
-        game="StreetFighterIISpecialChampionEdition-Genesis", 
+        game="StreetFighterIISpecialChampionEdition-Genesis-v0", 
         state=state,
         use_restricted_actions=retro.Actions.FILTERED, 
         obs_type=retro.Observations.IMAGE,
@@ -85,19 +86,24 @@ def _worker2p(
         try:
             cmd, data = remote.recv()
             if cmd == "step":
-                observation, reward, reward_other, done, info = env.step(data)
+                # 2P mode returns: (obs, reward, reward_other, done, truncated, info)
+                observation, reward, reward_other, done, truncated, info = env.step(data)
+                # Combine terminated and truncated for done signal
+                done = done or truncated
                 if done:
                     # save final observation where user can get it, then reset
                     info["terminal_observation"] = observation
                     observation = env.reset()
                 remote.send((observation, reward, reward_other, done, info))
             elif cmd == "seed":
-                remote.send(env.seed(data))
+                # gymnasium no longer supports env.seed(), seeding is done via reset(seed=seed)
+                # Just return the seed to satisfy the interface
+                remote.send(data)
             elif cmd == "reset":
                 observation = env.reset()
                 remote.send(observation)
             elif cmd == "render":
-                remote.send(env.render(data))
+                remote.send(env.render())
             elif cmd == "close":
                 env.close()
                 remote.close()
@@ -209,8 +215,8 @@ class SubprocVecEnv2P(VecEnv):
     def get_images(self) -> Sequence[np.ndarray]:
         for pipe in self.remotes:
             # gather images from subprocesses
-            # `mode` will be taken into account later
-            pipe.send(("render", "rgb_array"))
+            # render mode was set during env creation
+            pipe.send(("render", None))
         imgs = [pipe.recv() for pipe in self.remotes]
         return imgs
 
@@ -294,6 +300,10 @@ class VecTransposeImage2P(VecTransposeImage):
                 infos[idx]["terminal_observation"] = self.transpose_observations(infos[idx]["terminal_observation"])
 
         return self.transpose_observations(observations), rewards, rewards_other, dones, infos
+    
+    def get_images(self) -> Sequence[np.ndarray]:
+        """Pass through to underlying venv for rendering"""
+        return self.venv.get_images()
 
 
 def reset_child_params(module):

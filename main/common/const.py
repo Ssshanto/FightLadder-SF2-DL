@@ -1,4 +1,4 @@
-import retro
+import stable_retro as retro
 import os
 import numpy as np
 
@@ -8,10 +8,10 @@ SF_BONUS_LEVEL = [4, 8, 12]
 SF_DEFAULT_STATE = "Champion.Level1.RyuVsGuile"
 
 retro_directory = os.path.dirname(retro.__file__)
-sf_game_dir = "data/stable/StreetFighterIISpecialChampionEdition-Genesis"
+sf_game_dir = "data/stable/StreetFighterIISpecialChampionEdition-Genesis-v0"
 SF_STATE_DIR = os.path.join(retro_directory, sf_game_dir)
 
-sf_game = "StreetFighterIISpecialChampionEdition-Genesis"
+sf_game = "StreetFighterIISpecialChampionEdition-Genesis-v0"
 
 START_STATUS = 0
 

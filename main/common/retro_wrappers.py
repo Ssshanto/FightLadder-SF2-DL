@@ -3,13 +3,14 @@ import os
 import math
 import time
 import gzip
-import gym
+import cv2
+import gymnasium as gym
 import torch
 import numpy as np
 from collections import deque
 from typing import Dict, List, Optional, Tuple, Union
-from gym.wrappers import LazyFrames, FrameStack
-from gym.spaces import Box, Discrete, MultiBinary, MultiDiscrete, Dict
+from gymnasium.wrappers import FrameStackObservation
+from gymnasium.spaces import Box, Discrete, MultiBinary, MultiDiscrete, Dict
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
@@ -19,11 +20,59 @@ from .const import *
 from common.utils import linear_schedule
 
 
+class GridRenderer:
+    """Renders multiple environment frames in a grid layout using opencv"""
+    
+    def __init__(self, num_envs, frame_shape=(200, 256, 3)):
+        self.num_envs = num_envs
+        self.frame_shape = frame_shape
+        
+        # Calculate grid dimensions (as square as possible)
+        self.grid_cols = int(np.ceil(np.sqrt(num_envs)))
+        self.grid_rows = int(np.ceil(num_envs / self.grid_cols))
+        
+        self.window_name = 'FightLadder Training Grid'
+        
+    def render_grid(self, frames):
+        """
+        Arrange frames in a grid and display with opencv
+        
+        Args:
+            frames: list of RGB frames from environments
+        """
+        if not frames or frames[0] is None:
+            return
+        
+        # Pad frames list to fill grid
+        frames = list(frames)
+        while len(frames) < self.grid_rows * self.grid_cols:
+            frames.append(np.zeros_like(frames[0]))
+        
+        # Arrange frames in grid
+        rows = []
+        for i in range(self.grid_rows):
+            start_idx = i * self.grid_cols
+            end_idx = start_idx + self.grid_cols
+            row_frames = frames[start_idx:end_idx]
+            rows.append(np.hstack(row_frames))
+        
+        grid = np.vstack(rows)
+        
+        # opencv expects BGR
+        grid_bgr = cv2.cvtColor(grid, cv2.COLOR_RGB2BGR)
+        
+        cv2.imshow(self.window_name, grid_bgr)
+        cv2.waitKey(1)
+        
+    def close(self):
+        cv2.destroyWindow(self.window_name)
+
+
 class SFWrapper(gym.Wrapper):
 
     def __init__(self, env, side, reset_type="round", init_level=1, rendering=False, num_stack=12, num_step_frames=8, state_dir=None, verbose=False, enable_combo=True, null_combo=False, transform_action=False):
         super(SFWrapper, self).__init__(env)
-        self.env = FrameStack(env, num_stack=num_stack)
+        self.env = FrameStackObservation(env, stack_size=num_stack)
 
         assert side in ['left', 'right', 'both'], "side should be 'left', 'right' or 'both'"
         self.side = side
@@ -40,8 +89,10 @@ class SFWrapper(gym.Wrapper):
         self.prev_agent_hp = self.full_hp
         self.prev_enemy_hp = self.full_hp
 
-        # self.observation_space = Box(low=0, high=255, shape=(100, 128, 3 * self.num_stack), dtype=np.uint8)
-        self.observation_space = Box(low=0, high=255, shape=(100, 128, len(range(0, self.num_stack, self.num_step_frames // 2))), dtype=np.uint8)
+        # Observation space: downsampled frames (200->100, 256->128) with sampled frames along last axis
+        # num_sampled_frames = len(range(0, num_stack, num_step_frames // 2)) = len(range(0, 12, 4)) = 3
+        num_sampled_frames = len(range(0, self.num_stack, self.num_step_frames // 2))
+        self.observation_space = Box(low=0, high=255, shape=(100, 128, num_sampled_frames), dtype=np.uint8)
         self.action_dim = 12 + 3 if (enable_combo or null_combo) else 12 # 3 bits for combos
         if transform_action:
             # self.action_space = MultiDiscrete([len(DIRECTIONS_BUTTONS) + len(ATTACKS_BUTTONS) + len(COMBOS) for _ in range(self.players)])
@@ -88,21 +139,27 @@ class SFWrapper(gym.Wrapper):
             f.write(content)
 
     def _get_obs(self, obs):
-        # return np.concatenate([o[::2, ::2, :] for o in obs], axis=-1)
+        # gymnasium's FrameStackObservation returns shape (stack_size, H, W, C) = (12, 200, 256, 3)
+        # We sample every (num_step_frames // 2) = 4 frames, downsample spatially by 2x,
+        # and extract one channel per frame (cycling through R, G, B)
+        # Result shape: (100, 128, num_sampled_frames) where num_sampled_frames = 12 // 4 = 3
         if isinstance(obs, dict):
-            # print(np.stack([o[::2, ::2, i % 3] for (i, o) in enumerate(obs['observations'][::(self.num_step_frames // 2)])], axis=-1).shape, flush=True)
-            # print(obs['actions'], flush=True)
-            # print(obs['actions'][::(self.num_step_frames // 2)], flush=True)
-            # print(np.squeeze(obs['actions'][::(self.num_step_frames // 2)], axis=-1), flush=True)
+            # Handle dict observation space (if used with action history)
+            frames = obs['observations']  # shape: (stack_size, H, W, C)
+            sampled_indices = range(0, self.num_stack, self.num_step_frames // 2)
+            processed = np.stack([frames[i, ::2, ::2, i % 3] for i in sampled_indices], axis=-1)
             return {
-                'observations': np.stack([o[::2, ::2, i % 3] for (i, o) in enumerate(obs['observations'][::(self.num_step_frames // 2)])], axis=-1),
-                'actions': np.squeeze(obs['actions'][::(self.num_step_frames // 2)], axis=-1),
+                'observations': processed,
+                'actions': np.squeeze(obs['actions'][list(sampled_indices)], axis=-1),
             }
         else:
-            return np.stack([o[::2, ::2, i % 3] for (i, o) in enumerate(obs[::(self.num_step_frames // 2)])], axis=-1)
+            # Standard observation: obs shape is (stack_size, H, W, C) = (12, 200, 256, 3)
+            sampled_indices = range(0, self.num_stack, self.num_step_frames // 2)
+            # For each sampled frame, downsample spatially and take one color channel
+            return np.stack([obs[i, ::2, ::2, i % 3] for i in sampled_indices], axis=-1)
 
-    def reset(self):
-        obs = self.env.reset()
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
 
         self.prev_agent_hp = self.full_hp
         self.prev_enemy_hp = self.full_hp
@@ -188,7 +245,7 @@ class SFWrapper(gym.Wrapper):
             skip_level = self.level
             no_op = np.zeros_like(action[:24])
             while self.level == skip_level:
-                obs, _reward, _done, info = self.env.step(no_op)
+                obs, _reward, _terminated, _truncated, info = self.env.step(no_op)
                 self.update_status(info, bonus=True)
             if self.verbose:
                 print(f"Skip bonus level {skip_level}")
@@ -241,11 +298,10 @@ class SFWrapper(gym.Wrapper):
         
         for i in range(self.num_step_frames):            
             # Keep the button pressed for (num_step_frames - 1) frames.
-            obs, _reward, _done, info = self.env.step(action_seq[i])
+            obs, _reward, _terminated, _truncated, info = self.env.step(action_seq[i])
             self.update_status(info)
-            if self.rendering:
-                self.env.render()
-                time.sleep(0.01)
+            # Note: Rendering is now handled by GridRenderer via RenderCallback in training loop
+            # Individual env rendering in subprocesses would create multiple windows and conflict with grid display
 
         agent_hp = info['agent_hp']
         enemy_hp = info['enemy_hp']
@@ -333,12 +389,16 @@ class SFWrapper(gym.Wrapper):
         if custom_done:
             info['outcome'] = 'win' if (agent_hp > enemy_hp) else ('lose' if (agent_hp < enemy_hp) else 'draw')
 
+        # truncated is always False - we use terminated (custom_done) for episode boundaries
+        truncated = False
+        
         if self.side == 'left':
-            return self._get_obs(obs), 0.001 * custom_reward, custom_done, info 
+            return self._get_obs(obs), 0.001 * custom_reward, custom_done, truncated, info 
         elif self.side == 'right':
-            return self._get_obs(obs), 0.001 * custom_reward_inverse, custom_done, info 
+            return self._get_obs(obs), 0.001 * custom_reward_inverse, custom_done, truncated, info 
         else:
-            return self._get_obs(obs), 0.001 * custom_reward, 0.001 * custom_reward_inverse, custom_done, info 
+            # 2-player mode: return both rewards for self-play training
+            return self._get_obs(obs), 0.001 * custom_reward, 0.001 * custom_reward_inverse, custom_done, truncated, info 
 
 
 class Monitor2P(Monitor):
@@ -364,7 +424,10 @@ class Monitor2P(Monitor):
     def step(self, action: Union[np.ndarray, int]) -> GymStepReturn:
         if self.needs_reset:
             raise RuntimeError("Tried to step environment that needs reset")
-        observation, reward, reward_other, done, info = self.env.step(action)
+        # 2P mode returns: (obs, reward, reward_other, done, truncated, info)
+        observation, reward, reward_other, done, truncated, info = self.env.step(action)
+        # Combine terminated and truncated for done signal
+        done = done or truncated
         self.rewards.append(reward)
         self.rewards_other.append(reward_other)
         if done:
@@ -384,4 +447,5 @@ class Monitor2P(Monitor):
                 self.results_writer.write_row(ep_info)
             info["episode"] = ep_info
         self.total_steps += 1
-        return observation, reward, reward_other, done, info
+        # Return 6 values for 2P mode compatibility with _worker2p
+        return observation, reward, reward_other, done, truncated, info

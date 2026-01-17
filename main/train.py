@@ -5,7 +5,7 @@ import torch
 import argparse
 from PIL import Image
 
-import retro
+import stable_retro as retro
 from stable_baselines3 import PPO, DQN
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback

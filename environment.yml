@@ -1,6 +1,7 @@
 name: fightladder
 channels:
   - defaults
+  - conda-forge
 dependencies:
   - _libgcc_mutex=0.1=main
   - ca-certificates=2023.12.12=h06a4308_0
@@ -19,6 +20,8 @@ dependencies:
   - wheel=0.38.4=py38h06a4308_0
   - xz=5.2.5=h7f8727e_1
   - zlib=1.2.12=h7f8727e_2
+  - ffmpeg
+  - av
   - pip:
     - absl-py==1.4.0
     - alembic==1.13.1
@@ -28,7 +31,6 @@ dependencies:
     - arrow==1.2.3
     - asttokens==2.2.1
     - attrs==23.1.0
-    - av==10.0.0
     - backcall==0.2.0
     - beautifulsoup4==4.12.2
     - bleach==6.0.0

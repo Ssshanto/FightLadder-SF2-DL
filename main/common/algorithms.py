@@ -4,7 +4,7 @@ import random
 import torch as th
 import numpy as np
 import torch.nn as nn
-from gym import spaces
+from gymnasium import spaces
 from copy import deepcopy
 from collections import deque
 from torch.nn import functional as F
