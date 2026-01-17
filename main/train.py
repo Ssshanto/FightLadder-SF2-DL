@@ -3,12 +3,14 @@ import av
 import sys
 import torch
 import argparse
+import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 import stable_retro as retro
 from stable_baselines3 import PPO, DQN
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from common.const import *
@@ -16,41 +18,57 @@ from common.utils import linear_schedule, AnnealDenseCallback, AnnealAgressiveCa
 from common.retro_wrappers import SFWrapper
 
 
-def make_env(game, state, side, reset_type, rendering, init_level=1, state_dir=None, verbose=False, enable_combo=True, null_combo=False, transform_action=False, num_stack=12, num_step_frames=8, seed=0):
+def make_env(game, state, side, reset_type, rendering, init_level=1, state_dir=None, verbose=False, enable_combo=True, null_combo=False, transform_action=False, num_stack=12, num_step_frames=8, seed=0, render_mode=None):
     def _init():
         players = 2
+        actual_render_mode = render_mode
+        if actual_render_mode is None and rendering:
+            actual_render_mode = 'rgb_array'
+            
         env = retro.make(
             game=game, 
             state=state, 
             use_restricted_actions=retro.Actions.FILTERED,
             obs_type=retro.Observations.IMAGE,
-            players=players
+            players=players,
+            render_mode=actual_render_mode,
         )
         env = SFWrapper(env, side=side, rendering=rendering, reset_type=reset_type, init_level=init_level, state_dir=state_dir, verbose=verbose, enable_combo=enable_combo, null_combo=null_combo, transform_action=transform_action, num_stack=num_stack, num_step_frames=num_step_frames)
         env = Monitor(env)
-        env.seed(seed)
         return env
     return _init
 
 
 @torch.no_grad()
-def evaluate(args, model=None, left_model=None, right_model=None, greedy=0.99, record=True, suffix=""):
+def evaluate(args, model=None, left_model=None, right_model=None, greedy=0.99, record=True, suffix="", render_fps=60):
     reset_type = 'round'
     win_cnt = 0
+    
+    grid_renderer = None
+    if args.render:
+        from common.retro_wrappers import GridRenderer
+        import time
+        grid_renderer = GridRenderer(num_envs=1)
+        frame_delay = 1.0 / render_fps if render_fps > 0 else 0
     
     for i in range(1, args.num_episodes + 1):
 
         if 'starall' in args.state:
             states = [args.state.replace('starall', f'star{i}') for i in range(1, 9)]
-            env = make_env(sf_game, state=states[i % len(states)], side=args.side, reset_type=reset_type, rendering=False, verbose=True, enable_combo=args.enable_combo, null_combo=args.null_combo, transform_action=args.transform_action, num_stack=args.num_stack, num_step_frames=args.num_step_frames, seed=i)().env
+            render_mode = "rgb_array" if (record or args.render) else None
+            env = make_env(sf_game, state=states[i % len(states)], side=args.side, reset_type=reset_type, rendering=args.render, verbose=True, enable_combo=args.enable_combo, null_combo=args.null_combo, transform_action=args.transform_action, num_stack=args.num_stack, num_step_frames=args.num_step_frames, seed=i, render_mode=render_mode)().env
         else:
-            env = make_env(sf_game, state=args.state, side=args.side, reset_type=reset_type, rendering=False, verbose=True, enable_combo=args.enable_combo, null_combo=args.null_combo, transform_action=args.transform_action, num_stack=args.num_stack, num_step_frames=args.num_step_frames, seed=i)().env
+            render_mode = "rgb_array" if (record or args.render) else None
+            env = make_env(sf_game, state=args.state, side=args.side, reset_type=reset_type, rendering=args.render, verbose=True, enable_combo=args.enable_combo, null_combo=args.null_combo, transform_action=args.transform_action, num_stack=args.num_stack, num_step_frames=args.num_step_frames, seed=i, render_mode=render_mode)().env
 
         done = False
         
         obs = env.reset()
         if record:
-            video_log = [Image.fromarray(env.render(mode="rgb_array"))]
+            base_env = env
+            while hasattr(base_env, 'env'):
+                base_env = base_env.env
+            video_log = [Image.fromarray(base_env.render())]
 
         while not done:
             if model is not None:
@@ -58,7 +76,8 @@ def evaluate(args, model=None, left_model=None, right_model=None, greedy=0.99, r
                     action, _states = model.predict(obs, deterministic=False)
                 else:
                     action, _states = model.predict(obs, deterministic=True)
-                obs, reward, done, info = env.step(action)
+                obs, reward, done, truncated, info = env.step(action)
+                done = done or truncated
             elif left_model is not None and right_model is not None:
                 if np.random.uniform() > greedy:
                     left_action, left_states = left_model.predict(obs, deterministic=False)
@@ -69,15 +88,24 @@ def evaluate(args, model=None, left_model=None, right_model=None, greedy=0.99, r
                 else:
                     right_action, right_states = right_model.predict(obs, deterministic=True)
                 action = np.hstack([left_action, right_action])
-                obs, reward, reward_other, done, info = env.step(action)
+                obs, reward, reward_other, done, truncated, info = env.step(action)
+                done = done or truncated
             else:
                 raise ValueError("No model provided")
 
-            if record:
-                video_log.append(Image.fromarray(env.render(mode="rgb_array")))
-            # print(info)
-            # if done:
-            #     video_log[-1].save(f"{args.video_dir}/episode_{i}.png")
+            if record or args.render:
+                base_env = env
+                while hasattr(base_env, 'env'):
+                    base_env = base_env.env
+                frame = base_env.render()
+                
+                if record:
+                    video_log.append(Image.fromarray(frame))
+                
+                if args.render and grid_renderer:
+                    grid_renderer.render_grid([frame])
+                    if frame_delay > 0:
+                        time.sleep(frame_delay)
 
             if done:
                 if record:
@@ -98,11 +126,11 @@ def evaluate(args, model=None, left_model=None, right_model=None, greedy=0.99, r
         if info['enemy_hp'] < info['agent_hp']:
             print("Victory!")
             win_cnt += 1
-
-        # print("Total reward: {}\n".format(total_reward))
-        # episode_reward_sum += total_reward
     
         env.close()
+    
+    if grid_renderer:
+        grid_renderer.close()
     
     win_rate = win_cnt / args.num_episodes
     print("Winning rate: {}".format(win_rate))
@@ -110,7 +138,7 @@ def evaluate(args, model=None, left_model=None, right_model=None, greedy=0.99, r
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Reset game stats')
+    parser = argparse.ArgumentParser(description='Train PPO agent vs CPU opponent')
     parser.add_argument('--reset', choices=['round', 'match', 'game'], help='Reset stats for a round, a match, or the whole game', default='round')
     parser.add_argument('--model-file', help='The model to continue to learn from')
     parser.add_argument('--save-dir', help='The directory to save the trained models', default="trained_models")
@@ -124,7 +152,6 @@ def main():
     parser.add_argument('--num-epoch', type=int, help='Finetune how many epochs', default=50)
     parser.add_argument('--total-steps', type=int, help='How many total steps to train', default=int(1e7))
     parser.add_argument('--video-dir', help='The path to save videos', default='videos')
-    # parser.add_argument('--finetune-dir', help='The path to save finetune results', default='finetune')
     parser.add_argument('--init-level', type=int, help='Initial level to load from. By default 0, starting from pretrain', default=0)
     parser.add_argument('--resume-epoch', type=int, help='Resume epoch. By default 0, starting from pretrain', default=0)
     parser.add_argument('--enable-combo', action='store_true', help='Enable special move action space for environment')
@@ -135,6 +162,8 @@ def main():
     parser.add_argument('--num-step-frames', type=int, help='Number of frames per step', default=8)
     parser.add_argument('--anneal-dense-coeff', action='store_true', help='Anneal dense_coeff')
     parser.add_argument('--anneal-agressive-coeff', action='store_true', help='Anneal agressive_coeff')
+    parser.add_argument('--render-fps', type=int, help='FPS for rendering during evaluation', default=60)
+    parser.add_argument('--eval-only', action='store_true', help='Only run evaluation, skip training')
     
     args = parser.parse_args()
     print("command line args:" + str(args))
@@ -144,28 +173,37 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
     os.makedirs(args.video_dir, exist_ok=True)
-    # os.makedirs(args.finetune_dir, exist_ok=True)
+    
+    if args.eval_only:
+        if not args.model_file:
+            raise ValueError("--eval-only requires --model-file to specify which model to evaluate")
+        print(f"\n[INFO] Evaluation-only mode, loading model from {args.model_file}...")
+        
+        dummy_env = SubprocVecEnv([
+            make_env(sf_game, state=args.state, side=args.side, reset_type=args.reset, rendering=False, 
+                    enable_combo=args.enable_combo, null_combo=args.null_combo, 
+                    transform_action=args.transform_action, num_stack=args.num_stack, 
+                    num_step_frames=args.num_step_frames, seed=0, render_mode=None)
+        ])
+        
+        model = PPO.load(args.model_file, env=dummy_env, device="cuda")
+        dummy_env.close()
+        
+        results = evaluate(args, model, record=True, render_fps=args.render_fps)
+        print(results)
+        return
                                  
     # Set up the environment and model
+    render_mode = 'rgb_array' if args.render else None
     if 'starall' in args.state:
         states = [args.state.replace('starall', f'star{i}') for i in range(1, 9)]
-        env = SubprocVecEnv([make_env(sf_game, state=state, side=args.side, reset_type=args.reset, rendering=args.render, enable_combo=args.enable_combo, null_combo=args.null_combo, transform_action=args.transform_action, num_stack=args.num_stack, num_step_frames=args.num_step_frames, seed=i) for i, state in enumerate(states)] * (args.num_env // 8))
+        env = SubprocVecEnv([make_env(sf_game, state=state, side=args.side, reset_type=args.reset, rendering=args.render, enable_combo=args.enable_combo, null_combo=args.null_combo, transform_action=args.transform_action, num_stack=args.num_stack, num_step_frames=args.num_step_frames, seed=i, render_mode=render_mode) for i, state in enumerate(states)] * (args.num_env // 8))
     else:
-        env = SubprocVecEnv([make_env(sf_game, state=args.state, side=args.side, reset_type=args.reset, rendering=args.render, enable_combo=args.enable_combo, null_combo=args.null_combo, transform_action=args.transform_action, num_stack=args.num_stack, num_step_frames=args.num_step_frames, seed=i) for i in range(args.num_env)])
+        env = SubprocVecEnv([make_env(sf_game, state=args.state, side=args.side, reset_type=args.reset, rendering=args.render, enable_combo=args.enable_combo, null_combo=args.null_combo, transform_action=args.transform_action, num_stack=args.num_stack, num_step_frames=args.num_step_frames, seed=i, render_mode=render_mode) for i in range(args.num_env)])
 
     # Set linear schedule for learning rate
-    # Start
     lr_schedule = linear_schedule(2.5e-4, 2.5e-6)
-
-    # fine-tune
-    # lr_schedule = linear_schedule(5.0e-5, 2.5e-6)
-
-    # Set linear scheduler for clip range
-    # Start
     clip_range_schedule = linear_schedule(0.15, 0.025)
-
-    # fine-tune
-    # clip_range_schedule = linear_schedule(0.075, 0.025)
 
     model = PPO(
         "CnnPolicy", 
@@ -173,7 +211,7 @@ def main():
         device="cuda", 
         verbose=1,
         n_steps=512,
-        batch_size=1024, # 512,
+        batch_size=1024,
         n_epochs=4,
         gamma=0.94,
         learning_rate=lr_schedule,
@@ -186,9 +224,52 @@ def main():
         model.set_parameters(args.model_file)
 
     # Set up callbacks
-    checkpoint_interval = 31250 # checkpoint_interval * num_envs = total_steps_per_checkpoint
+    checkpoint_interval = 31250
     checkpoint_callback = CheckpointCallback(save_freq=checkpoint_interval, save_path=args.save_dir, name_prefix=args.model_name_prefix)
-    callbacks = [checkpoint_callback]
+    
+    class TqdmCallback(BaseCallback):
+        def __init__(self, total_timesteps):
+            super().__init__()
+            self.pbar = None
+            self.total_timesteps = total_timesteps
+            
+        def _on_training_start(self):
+            self.pbar = tqdm(total=self.total_timesteps, desc="Training", unit="steps")
+            
+        def _on_step(self):
+            if self.pbar:
+                self.pbar.update(self.num_timesteps - self.pbar.n)
+            return True
+            
+        def _on_training_end(self):
+            if self.pbar:
+                self.pbar.close()
+    
+    callbacks = [checkpoint_callback, TqdmCallback(args.total_steps)]
+    
+    if args.render:
+        from common.retro_wrappers import GridRenderer
+        
+        grid_renderer = GridRenderer(num_envs=args.num_env)
+        
+        class RenderCallback(BaseCallback):
+            def __init__(self, grid_renderer, render_freq=8):
+                super().__init__()
+                self.grid_renderer = grid_renderer
+                self.render_freq = render_freq
+                
+            def _on_step(self) -> bool:
+                if self.n_calls % self.render_freq == 0:
+                    frames = self.training_env.get_images()
+                    self.grid_renderer.render_grid(frames)
+                return True
+                
+            def _on_training_end(self) -> None:
+                self.grid_renderer.close()
+        
+        render_callback = RenderCallback(grid_renderer, render_freq=8)
+        callbacks.append(render_callback)
+    
     if args.anneal_dense_coeff:
         anneal_dense_callback = AnnealDenseCallback(anneal_fraction=0.1, anneal_initial_coeff=1.0, anneal_final_coeff=0.0)
         callbacks.append(anneal_dense_callback)
@@ -202,11 +283,9 @@ def main():
     )
     env.close()
 
-    # Save the final model
     model.save(os.path.join(args.save_dir, args.model_name_prefix + "_final_steps.zip"))
 
-    # Evaluate the model
-    evaluate(args, model)
+    evaluate(args, model, render_fps=args.render_fps)
 
 
 if __name__ == "__main__":
