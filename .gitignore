@@ -1,6 +1,24 @@
-main/__pycache__/
-main/common/__pycache__
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
 venv/
+env/
+ENV/
+
+# Model files (exclude all trained models)
+*.pt
+*.pth
+*.zip
+*.ckpt
+*.safetensors
+models/
+
+# Training outputs
 main/finetune/
 main/trained_models/
 main/trained_models_test/
@@ -8,3 +26,7 @@ main/logs/
 main/videos/
 main/tmp/
 utils/figures/
+
+# Keep ROM and state files (don't ignore these)
+!data/**/*.md
+!data/**/*.state
