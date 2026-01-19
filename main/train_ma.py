@@ -29,7 +29,7 @@ def make_env(game, state, side, reset_type, rendering, init_level=1, state_dir=N
         )
         env = SFWrapper(env, side=side, rendering=rendering, reset_type=reset_type, init_level=init_level, state_dir=state_dir, verbose=verbose, enable_combo=enable_combo, null_combo=null_combo, transform_action=transform_action)
         env = Monitor2P(env)
-        env.seed(seed)
+        # Note: seed is passed via reset() in Gymnasium API, not env.seed()
         return env
     return _init
 
