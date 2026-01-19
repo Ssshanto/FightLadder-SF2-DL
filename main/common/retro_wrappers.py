@@ -19,6 +19,8 @@ from stable_baselines3.common.type_aliases import GymObs, GymStepReturn
 from .const import *
 from common.utils import linear_schedule
 
+# Legacy concept extraction removed - use ground_truth.py for RAM-based features
+
 
 class GridRenderer:
     """Renders multiple environment frames in a grid layout using opencv"""
@@ -163,7 +165,7 @@ class SFWrapper(gym.Wrapper):
 
         self.prev_agent_hp = self.full_hp
         self.prev_enemy_hp = self.full_hp
-        
+
         self.level = self.init_level # NOTE: only valid for some states
         self.save_state = False
         self.match_status = START_STATUS # NOTE: only valid for some states
@@ -173,8 +175,8 @@ class SFWrapper(gym.Wrapper):
         self.extra_round = False
 
         self.total_timesteps = 0
-    
-        return self._get_obs(obs)
+
+        return self._get_obs(obs), info
 
     def update_status(self, info, bonus=False):
         # info['level'] = self.level
@@ -391,7 +393,7 @@ class SFWrapper(gym.Wrapper):
 
         # truncated is always False - we use terminated (custom_done) for episode boundaries
         truncated = False
-        
+
         if self.side == 'left':
             return self._get_obs(obs), 0.001 * custom_reward, custom_done, truncated, info 
         elif self.side == 'right':

@@ -19,6 +19,17 @@ from common.utils import linear_schedule, SubprocVecEnv2P, VecTransposeImage2P, 
 from common.algorithms import BRIPPO
 from common.retro_wrappers import SFWrapper, Monitor2P
 
+# Optional interpretability imports (rigorous modules only)
+try:
+    from interpretability import (
+        GroundTruthExtractor,
+        MutualInformationAnalyzer,
+        GROUND_TRUTH_FEATURES,
+    )
+    INTERPRETABILITY_AVAILABLE = True
+except ImportError:
+    INTERPRETABILITY_AVAILABLE = False
+
 
 STATE = "Champion.RyuVsRyu.2Player.align"
 
@@ -154,7 +165,11 @@ def main():
     parser.add_argument('--other-timescale', type=float, help='Other agent learning rate scale', default=1.0)
     parser.add_argument('--render-fps', type=int, help='FPS for rendering during evaluation', default=60)
     parser.add_argument('--eval-only', action='store_true', help='Only run evaluation, skip training')
-    
+    parser.add_argument('--enable-interpretability', action='store_true', help='Enable interpretability logging during training')
+    parser.add_argument('--interp-log-dir', type=str, default='interpretability_logs', help='Directory for interpretability logs')
+    parser.add_argument('--interp-log-freq', type=int, default=1000, help='Interpretability logging frequency (steps)')
+    parser.add_argument('--interp-probe-freq', type=int, default=50000, help='Concept probe training frequency (steps)')
+
     args = parser.parse_args()
     print("command line args:" + str(args))
 
@@ -277,7 +292,26 @@ def main():
         
         render_callback = RenderCallback(grid_renderer, render_freq=8)
         callbacks.append(render_callback)
-    
+
+    # Add interpretability callback if enabled (with opponent analysis for self-play)
+    if args.enable_interpretability:
+        if INTERPRETABILITY_AVAILABLE:
+            os.makedirs(args.interp_log_dir, exist_ok=True)
+            
+            # Runtime interpretability using rigorous MI analysis
+            from interpretability.callbacks.runtime_interpretability import RuntimeInterpretabilityCallback
+            
+            interp_callback = RuntimeInterpretabilityCallback(
+                log_dir=args.interp_log_dir,
+                analysis_frequency=args.interp_probe_freq,
+                log_frequency=args.interp_log_freq,
+                verbose=1
+            )
+            callbacks.append(interp_callback)
+            print(f"[INFO] Runtime interpretability enabled. Logs will be saved to {args.interp_log_dir}")
+        else:
+            print("[WARNING] --enable-interpretability specified but interpretability module not available")
+
     model.learn( 
         total_timesteps=args.total_steps*args.other_timescale,
         callback=callbacks,

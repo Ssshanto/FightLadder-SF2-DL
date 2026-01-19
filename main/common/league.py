@@ -12,6 +12,9 @@ from .const import *
 from .algorithms import LeaguePPO
 from .nash import NashEquilibriumECOSSolver
 
+# Optional interpretability support (OCRA removed - use rigorous MI analysis instead)
+INTERPRETABILITY_AVAILABLE = False
+
 
 PER_HISTORICAL_STEPS = 1e7 # 5e3
 
@@ -45,7 +48,7 @@ def pfsp(win_rates, weighting="linear"):
 
 class Payoff:
 
-    def __init__(self, save_dir="trained_models/ma"):
+    def __init__(self, save_dir="trained_models/ma", enable_ocra=False):
         self._players = {}
         self._players_other = {}
         self._wins = collections.defaultdict(lambda: 0)
@@ -54,6 +57,11 @@ class Payoff:
         self._games = collections.defaultdict(lambda: 0)
         self._decay = 0.99
         self.save_dir = save_dir
+
+        # OCRA: Opponent-Conditioned Representation Analysis (disabled - use MI analysis instead)
+        self.enable_ocra = False
+        self.opponent_analyzer = None
+        self._ocra_match_stats = collections.defaultdict(list)  # Track stats per matchup
 
     def _win_rate(self, _home, _away, side):
         if self._games[_home, _away] == 0:
@@ -97,6 +105,15 @@ class Payoff:
             self._draws[home, away] += 1
         else:
             self._losses[home, away] += 1
+
+        # OCRA: Log matchup result for opponent analysis
+        if self.enable_ocra and self.opponent_analyzer is not None:
+            matchup_key = (home, away)
+            self._ocra_match_stats[matchup_key].append({
+                'result': result,
+                'total_games': self._games[home, away],
+                'win_rate': self._win_rate(home, away, 'left'),
+            })
 
     def add_player(self, cls_name, kwargs):
         save_kwargs = {

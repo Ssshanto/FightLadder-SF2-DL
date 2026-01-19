@@ -33,6 +33,14 @@ from stable_baselines3.common.vec_env import VecEnv
 from .const import *
 from .nash import compute_nash
 
+# Optional interpretability support
+try:
+    from interpretability.callbacks import InterpretabilityLogger
+    INTERPRETABILITY_AVAILABLE = True
+except ImportError:
+    INTERPRETABILITY_AVAILABLE = False
+    InterpretabilityLogger = None
+
 
 SelfIPPO = TypeVar("SelfIPPO", bound="IPPO")
 SelfLeaguePPO = TypeVar("SelfLeaguePPO", bound="LeaguePPO")
@@ -99,12 +107,19 @@ class IPPO(PPO):
         self.update_right = update_right
         self.other_learning_rate = other_learning_rate
 
+        # Interpretability support
+        self.interpretability_logger = None
+
         if _init_setup_model:
             self._setup_model()
 
+    def set_interpretability_logger(self, logger):
+        """Set the interpretability logger for activation collection"""
+        self.interpretability_logger = logger
+
     def _setup_model(self) -> None:
         super()._setup_model()
-        
+
         buffer_cls = DictRolloutBuffer if isinstance(self.observation_space, spaces.Dict) else RolloutBuffer
 
         self.rollout_buffer_other = buffer_cls(
@@ -320,6 +335,12 @@ class IPPO(PPO):
             with th.no_grad():
                 # Convert to pytorch tensor or to TensorDict
                 obs_tensor = obs_as_tensor(self._last_obs, self.device)
+
+                # Interpretability: Extract intermediate activations
+                if self.interpretability_logger is not None:
+                    features = rollout_policy.features_extractor(obs_tensor)
+                    self.interpretability_logger.log_activations(features, obs_tensor)
+
                 actions, values, log_probs = rollout_policy(obs_tensor)
                 actions_other, values_other, log_probs_other = rollout_policy_other(obs_tensor)
             actions = actions.cpu().numpy()
