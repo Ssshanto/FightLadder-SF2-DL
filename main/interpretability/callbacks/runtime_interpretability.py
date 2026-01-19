@@ -4,6 +4,7 @@ Runtime Interpretability Callback
 Performs rigorous interpretability analysis during training:
 - Collects activations and ground truth features from rollouts
 - Computes mutual information I(action; feature) to measure policy dependencies
+- Tracks activation statistics (mean, std, sparsity)
 - Logs results to TensorBoard for tracking learning dynamics
 
 This module uses ONLY raw RAM values as ground truth, avoiding hand-crafted
@@ -33,19 +34,22 @@ class ActivationBuffer:
     max_size: int = 10000
     activations: List[np.ndarray] = field(default_factory=list)
     actions: List[int] = field(default_factory=list)
+    rewards: List[float] = field(default_factory=list)
     features: Dict[str, List[float]] = field(default_factory=lambda: {k: [] for k in GROUND_TRUTH_FEATURES})
     
-    def add(self, activation: np.ndarray, action: int, feature_dict: Dict[str, float]):
+    def add(self, activation: np.ndarray, action: int, feature_dict: Dict[str, float], reward: float = 0.0):
         """Add a single timestep's data to the buffer."""
         if len(self.activations) >= self.max_size:
             # Remove oldest entries
             self.activations.pop(0)
             self.actions.pop(0)
+            self.rewards.pop(0)
             for k in self.features:
                 self.features[k].pop(0)
         
         self.activations.append(activation)
         self.actions.append(action)
+        self.rewards.append(reward)
         for k, v in feature_dict.items():
             if k in self.features:
                 self.features[k].append(v)
@@ -57,6 +61,7 @@ class ActivationBuffer:
         """Clear all data from buffer."""
         self.activations.clear()
         self.actions.clear()
+        self.rewards.clear()
         for k in self.features:
             self.features[k].clear()
     
@@ -65,6 +70,7 @@ class ActivationBuffer:
         return {
             'activations': np.array(self.activations) if self.activations else np.array([]),
             'actions': np.array(self.actions) if self.actions else np.array([]),
+            'rewards': np.array(self.rewards) if self.rewards else np.array([]),
             'features': {k: np.array(v) for k, v in self.features.items()}
         }
 
@@ -107,6 +113,15 @@ class RuntimeInterpretabilityCallback(BaseCallback):
         # Tracking
         self.analysis_count = 0
         self.last_mi_results: Optional[Dict[str, float]] = None
+        
+        # MI evolution tracking (for plotting learning dynamics)
+        self.mi_history: List[Dict] = []
+        self.activation_stats_history: List[Dict] = []
+        
+        # Episode tracking for win rate
+        self.episode_wins = 0
+        self.episode_count = 0
+        self.recent_wins = deque(maxlen=100)  # Rolling window
         
         # Forward hook handle
         self._hook_handle = None
@@ -156,10 +171,25 @@ class RuntimeInterpretabilityCallback(BaseCallback):
         # Extract ground truth features from info dict
         infos = self.locals.get('infos', [])
         actions = self.locals.get('actions', [])
+        rewards = self.locals.get('rewards', [])
+        dones = self.locals.get('dones', [])
+        
+        # Track episode outcomes for win rate
+        for i, (info, done) in enumerate(zip(infos, dones)):
+            if done and isinstance(info, dict):
+                self.episode_count += 1
+                # Check if agent won (agent_hp > enemy_hp at end)
+                agent_hp = info.get('agent_hp', 0)
+                enemy_hp = info.get('enemy_hp', 0)
+                win = 1 if agent_hp > enemy_hp else 0
+                self.episode_wins += win
+                self.recent_wins.append(win)
         
         # Debug: print buffer size periodically
         if self.num_timesteps % 5000 == 0 and self.verbose >= 1:
-            print(f"[RuntimeInterp] Step {self.num_timesteps}, buffer size: {len(self.buffer)}")
+            win_rate = sum(self.recent_wins) / len(self.recent_wins) if self.recent_wins else 0
+            print(f"[RuntimeInterp] Step {self.num_timesteps}, buffer: {len(self.buffer)}, "
+                  f"win_rate (last 100): {win_rate:.2%}")
         
         if infos and self._last_activation is not None:
             for i, info in enumerate(infos):
@@ -186,8 +216,11 @@ class RuntimeInterpretabilityCallback(BaseCallback):
                 else:
                     action = 0
                 
+                # Get reward
+                reward = float(rewards[i]) if i < len(rewards) else 0.0
+                
                 # Add to buffer
-                self.buffer.add(activation, action, features)
+                self.buffer.add(activation, action, features, reward)
         
         # Periodic analysis based on num_timesteps
         if self.num_timesteps > 0 and self.num_timesteps % self.analysis_frequency == 0:
@@ -197,6 +230,44 @@ class RuntimeInterpretabilityCallback(BaseCallback):
                 print(f"[RuntimeInterp] Step {self.num_timesteps}: buffer too small ({len(self.buffer)}), skipping analysis")
         
         return True
+    
+    def _compute_activation_stats(self, activations: np.ndarray) -> Dict[str, float]:
+        """Compute statistics about the activation patterns."""
+        if len(activations) == 0:
+            return {}
+        
+        stats = {
+            'activation_mean': float(np.mean(activations)),
+            'activation_std': float(np.std(activations)),
+            'activation_max': float(np.max(activations)),
+            'activation_min': float(np.min(activations)),
+            'activation_sparsity': float(np.mean(activations == 0)),  # Fraction of zeros
+            'activation_dim': int(activations.shape[1]) if len(activations.shape) > 1 else 1,
+        }
+        
+        # Per-neuron statistics (variance across samples)
+        if len(activations.shape) > 1:
+            neuron_vars = np.var(activations, axis=0)
+            stats['neuron_var_mean'] = float(np.mean(neuron_vars))
+            stats['neuron_var_std'] = float(np.std(neuron_vars))
+            stats['dead_neurons'] = int(np.sum(neuron_vars < 1e-6))  # Nearly constant neurons
+            stats['active_neurons'] = int(np.sum(neuron_vars >= 1e-6))
+        
+        return stats
+    
+    def _compute_feature_stats(self, features: Dict[str, np.ndarray]) -> Dict[str, Dict[str, float]]:
+        """Compute statistics for each ground truth feature."""
+        stats = {}
+        for name, values in features.items():
+            if len(values) == 0:
+                continue
+            stats[name] = {
+                'mean': float(np.mean(values)),
+                'std': float(np.std(values)),
+                'min': float(np.min(values)),
+                'max': float(np.max(values)),
+            }
+        return stats
     
     def _run_analysis(self):
         """Run mutual information analysis on collected data."""
@@ -209,6 +280,7 @@ class RuntimeInterpretabilityCallback(BaseCallback):
         data = self.buffer.to_arrays()
         activations = data['activations']
         actions = data['actions']
+        rewards = data['rewards']
         features = data['features']
         
         if len(activations) < 100:
@@ -237,20 +309,72 @@ class RuntimeInterpretabilityCallback(BaseCallback):
         
         self.last_mi_results = mi_results
         
+        # Compute activation statistics
+        activation_stats = self._compute_activation_stats(activations)
+        
+        # Compute feature statistics
+        feature_stats = self._compute_feature_stats(features)
+        
+        # Compute action distribution
+        unique_actions, action_counts = np.unique(actions, return_counts=True)
+        action_entropy = -np.sum((action_counts / len(actions)) * np.log2(action_counts / len(actions) + 1e-10))
+        
+        # Compute reward statistics
+        reward_stats = {
+            'reward_mean': float(np.mean(rewards)),
+            'reward_std': float(np.std(rewards)),
+            'reward_min': float(np.min(rewards)),
+            'reward_max': float(np.max(rewards)),
+        }
+        
+        # Win rate
+        win_rate = sum(self.recent_wins) / len(self.recent_wins) if self.recent_wins else 0.0
+        overall_win_rate = self.episode_wins / self.episode_count if self.episode_count > 0 else 0.0
+        
         # Log to TensorBoard
         if self.logger is not None:
+            # MI results
             for key, value in mi_results.items():
                 self.logger.record(f"interpretability/{key}", value)
+            
+            # Activation stats
+            for key, value in activation_stats.items():
+                self.logger.record(f"interpretability/activation/{key}", value)
+            
+            # Reward stats
+            for key, value in reward_stats.items():
+                self.logger.record(f"interpretability/{key}", value)
+            
+            # Action entropy
+            self.logger.record("interpretability/action_entropy", action_entropy)
+            self.logger.record("interpretability/num_unique_actions", len(unique_actions))
+            
+            # Win rates
+            self.logger.record("interpretability/win_rate_recent", win_rate)
+            self.logger.record("interpretability/win_rate_overall", overall_win_rate)
+            self.logger.record("interpretability/episode_count", self.episode_count)
+        
+        # Store in history for plotting
+        history_entry = {
+            'timestep': int(self.num_timesteps),
+            'analysis_count': self.analysis_count,
+            'n_samples': len(activations),
+            'mi_results': mi_results,
+            'activation_stats': activation_stats,
+            'feature_stats': feature_stats,
+            'reward_stats': reward_stats,
+            'action_entropy': float(action_entropy),
+            'num_unique_actions': int(len(unique_actions)),
+            'win_rate_recent': float(win_rate),
+            'win_rate_overall': float(overall_win_rate),
+            'episode_count': int(self.episode_count),
+        }
+        self.mi_history.append(history_entry)
         
         # Save results to file
         results_file = os.path.join(self.log_dir, f"mi_analysis_{self.analysis_count}.json")
         with open(results_file, 'w') as f:
-            json.dump({
-                'timestep': int(self.num_timesteps),
-                'analysis_count': self.analysis_count,
-                'n_samples': len(activations),
-                'mi_results': mi_results
-            }, f, indent=2)
+            json.dump(history_entry, f, indent=2)
         
         if self.verbose >= 1:
             # Print summary
@@ -259,6 +383,10 @@ class RuntimeInterpretabilityCallback(BaseCallback):
             for key, value in sorted_mi[:5]:  # Top 5
                 feature = key.replace('mi_action_', '')
                 print(f"  I(action; {feature}) = {value:.4f}")
+            print(f"  Action entropy: {action_entropy:.3f} ({len(unique_actions)} unique actions)")
+            print(f"  Win rate (recent/overall): {win_rate:.2%} / {overall_win_rate:.2%}")
+            print(f"  Activation dim: {activation_stats.get('activation_dim', 'N/A')}, "
+                  f"dead neurons: {activation_stats.get('dead_neurons', 'N/A')}")
     
     def _on_training_end(self):
         """Called at the end of training."""
@@ -270,9 +398,28 @@ class RuntimeInterpretabilityCallback(BaseCallback):
         if len(self.buffer) >= 100:
             self._run_analysis()
         
+        # Save complete MI history
+        history_file = os.path.join(self.log_dir, "mi_history.json")
+        with open(history_file, 'w') as f:
+            json.dump({
+                'total_timesteps': int(self.num_timesteps),
+                'total_analyses': self.analysis_count,
+                'total_episodes': self.episode_count,
+                'total_wins': self.episode_wins,
+                'final_win_rate': self.episode_wins / self.episode_count if self.episode_count > 0 else 0,
+                'history': self.mi_history,
+            }, f, indent=2)
+        
         if self.verbose >= 1:
             print(f"[RuntimeInterp] Training ended. Ran {self.analysis_count} analyses.")
+            print(f"[RuntimeInterp] Final win rate: {self.episode_wins}/{self.episode_count} "
+                  f"= {self.episode_wins/self.episode_count:.2%}" if self.episode_count > 0 else "")
+            print(f"[RuntimeInterp] MI history saved to {history_file}")
     
     def get_last_results(self) -> Optional[Dict[str, float]]:
         """Get the results from the last MI analysis."""
         return self.last_mi_results
+    
+    def get_mi_history(self) -> List[Dict]:
+        """Get the full MI analysis history."""
+        return self.mi_history

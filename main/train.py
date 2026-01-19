@@ -300,6 +300,7 @@ def main():
             # Runtime interpretability using rigorous MI analysis
             # Logs mutual information between actions and ground truth features
             from interpretability.callbacks.runtime_interpretability import RuntimeInterpretabilityCallback
+            from interpretability.callbacks.evaluation_metrics import EvaluationMetricsCallback
             
             interp_callback = RuntimeInterpretabilityCallback(
                 log_dir=args.interp_log_dir,
@@ -308,7 +309,20 @@ def main():
                 verbose=1
             )
             callbacks.append(interp_callback)
+            
+            # Evaluation metrics callback for RL performance tracking
+            eval_log_dir = os.path.join(args.interp_log_dir, "eval")
+            eval_callback = EvaluationMetricsCallback(
+                log_dir=eval_log_dir,
+                eval_freq=args.interp_probe_freq,  # Evaluate at same frequency as MI analysis
+                n_eval_episodes=10,
+                deterministic=True,
+                verbose=1,
+            )
+            callbacks.append(eval_callback)
+            
             print(f"[INFO] Runtime interpretability enabled. Logs will be saved to {args.interp_log_dir}")
+            print(f"[INFO] Evaluation metrics enabled. Logs will be saved to {eval_log_dir}")
         else:
             print("[WARNING] --enable-interpretability specified but interpretability module not available")
 
