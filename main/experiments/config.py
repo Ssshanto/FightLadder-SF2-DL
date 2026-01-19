@@ -59,6 +59,12 @@ SEEDS = [42, 123, 456, 789, 1024]
 
 # Training configurations
 TRAINING_CONFIGS = {
+    'minimal': {
+        'total_steps': 10_000,       # ~1-2 minutes - just for validation
+        'num_env': 2,
+        'interp_probe_freq': 5_000,  # 2 MI analyses per run
+        'checkpoint_freq': 5_000,
+    },
     'short': {
         'total_steps': 500_000,
         'num_env': 8,

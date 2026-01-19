@@ -76,7 +76,7 @@ def evaluate(args, model, greedy=0.99, record=True, render_fps=60):
 
         done = False
         
-        obs = env.reset()
+        obs, info = env.reset()
         if record:
             base_env = env
             while hasattr(base_env, 'env'):

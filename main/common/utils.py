@@ -93,14 +93,24 @@ def _worker2p(
                 if done:
                     # save final observation where user can get it, then reset
                     info["terminal_observation"] = observation
-                    observation = env.reset()
+                    result = env.reset()
+                    # Handle Gymnasium API which returns (obs, info)
+                    if isinstance(result, tuple):
+                        observation = result[0]
+                    else:
+                        observation = result
                 remote.send((observation, reward, reward_other, done, info))
             elif cmd == "seed":
                 # gymnasium no longer supports env.seed(), seeding is done via reset(seed=seed)
                 # Just return the seed to satisfy the interface
                 remote.send(data)
             elif cmd == "reset":
-                observation = env.reset()
+                result = env.reset()
+                # Handle Gymnasium API which returns (obs, info)
+                if isinstance(result, tuple):
+                    observation = result[0]
+                else:
+                    observation = result
                 remote.send(observation)
             elif cmd == "render":
                 remote.send(env.render())
