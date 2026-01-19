@@ -169,6 +169,10 @@ def main():
     parser.add_argument('--async-update', action='store_true', help='Update left and right asynchronously')
     parser.add_argument('--render-fps', type=int, help='FPS for rendering during evaluation', default=60)
     parser.add_argument('--eval-only', action='store_true', help='Only run evaluation, skip training')
+    parser.add_argument('--enable-interpretability', action='store_true', help='Enable interpretability logging during training')
+    parser.add_argument('--interp-log-dir', type=str, default='interpretability_logs', help='Directory for interpretability logs')
+    parser.add_argument('--interp-log-freq', type=int, default=1000, help='Interpretability logging frequency (steps)')
+    parser.add_argument('--interp-probe-freq', type=int, default=50000, help='Concept probe training frequency (steps)')
     
     args = parser.parse_args()
     print("command line args:" + str(args))
@@ -271,6 +275,23 @@ def main():
     
     # Create grid renderer and callback if rendering is enabled
     callbacks = [checkpoint_callback, TqdmCallback(args.total_steps)]
+    
+    # Add interpretability callback if enabled
+    if args.enable_interpretability:
+        try:
+            from interpretability.callbacks import RuntimeInterpretabilityCallback
+            os.makedirs(args.interp_log_dir, exist_ok=True)
+            interp_callback = RuntimeInterpretabilityCallback(
+                log_dir=args.interp_log_dir,
+                log_frequency=args.interp_log_freq,
+                analysis_frequency=args.interp_probe_freq,
+                verbose=1,
+            )
+            callbacks.append(interp_callback)
+            print(f"[INFO] Interpretability logging enabled, saving to {args.interp_log_dir}")
+        except ImportError as e:
+            print(f"[WARNING] Interpretability not available: {e}")
+    
     if args.render:
         from common.retro_wrappers import GridRenderer
         from stable_baselines3.common.callbacks import BaseCallback

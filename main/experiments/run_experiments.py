@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from experiments.config import (
     ExperimentConfig,
     generate_experiment_matrix,
-    MATCHUPS,
+    MATCHUPS_VS_CPU,
     SEEDS,
     TRAINING_CONFIGS,
 )

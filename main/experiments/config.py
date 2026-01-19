@@ -5,23 +5,47 @@ Defines the experiment matrix for systematic evaluation of:
 1. RL training performance (win rate, rewards, episode length)
 2. Interpretability metrics (MI evolution, feature dependencies)
 
+Supports multiple training paradigms:
+- Single-agent PPO vs CPU (train.py)
+- Best Response vs frozen opponent (best_response.py)
+- Independent PPO self-play (ippo.py)
+- League training with FSP/PSRO (train_ma.py)
+
 Designed for reproducibility and statistical rigor.
 """
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
+from enum import Enum
 import os
+
+
+# =============================================================================
+# TRAINING PARADIGMS
+# =============================================================================
+
+class TrainingParadigm(Enum):
+    """Available training paradigms."""
+    PPO_VS_CPU = "ppo_vs_cpu"           # Single-agent vs game AI (train.py)
+    BEST_RESPONSE = "best_response"      # Best response vs frozen opponent (best_response.py)
+    IPPO = "ippo"                        # Independent PPO self-play (ippo.py)
+    LEAGUE_FSP = "league_fsp"            # Fictitious Self-Play league (train_ma.py)
+    LEAGUE_PSRO = "league_psro"          # PSRO league (train_ma.py)
 
 
 # =============================================================================
 # EXPERIMENT PARAMETERS
 # =============================================================================
 
-# Available matchups using the default game states
-# Format: Champion.Level{N}.{Player}Vs{Opponent}
-MATCHUPS = [
-    "Champion.Level1.RyuVsGuile",      # Default - projectile vs projectile
-    # Additional matchups can be added here
+# Available matchups - single player vs CPU
+MATCHUPS_VS_CPU = [
+    "Champion.Level1.RyuVsGuile",       # Projectile vs projectile
+    "Champion.Level1.RyuVsRyu",         # Mirror match (if available)
+]
+
+# Available matchups - 2 player mode
+MATCHUPS_2P = [
+    "Champion.RyuVsRyu.2Player.align",  # Mirror match self-play
 ]
 
 # Characters available (for reference)
@@ -53,6 +77,66 @@ TRAINING_CONFIGS = {
         'interp_probe_freq': 500_000,  # 20 MI analyses per run
         'checkpoint_freq': 1_000_000,
     }
+}
+
+# =============================================================================
+# PAPER EXPERIMENT MATRIX (8-10 hour deadline with 2 GPUs)
+# =============================================================================
+# Priority 1 (Core - ~3hr each, run in parallel on 2 GPUs):
+#   - PPO vs Guile: 2M steps × 2 seeds
+#   - PPO vs Ryu (mirror): 2M steps × 2 seeds
+#
+# Priority 2 (Multi-agent - ~1.5hr each):
+#   - IPPO Self-Play: 2M steps × 1 seed
+#   - Best Response: 2M steps × 1 seed
+#
+# Total estimated time: ~5-6 hours with 2 GPUs in parallel
+
+PAPER_EXPERIMENTS = {
+    'priority_1': [
+        # Core single-agent experiments (must have)
+        {
+            'paradigm': TrainingParadigm.PPO_VS_CPU,
+            'matchup': 'Champion.Level1.RyuVsGuile',
+            'name': 'ppo_ryu_vs_guile',
+            'seeds': [42, 123],
+            'config': 'medium',
+        },
+        {
+            'paradigm': TrainingParadigm.PPO_VS_CPU,
+            'matchup': 'Champion.Level1.RyuVsRyu',
+            'name': 'ppo_ryu_vs_ryu_cpu',
+            'seeds': [42, 123],
+            'config': 'medium',
+        },
+    ],
+    'priority_2': [
+        # Multi-agent experiments (important for paper)
+        {
+            'paradigm': TrainingParadigm.IPPO,
+            'matchup': 'Champion.RyuVsRyu.2Player.align',
+            'name': 'ippo_self_play',
+            'seeds': [42],
+            'config': 'medium',
+        },
+        {
+            'paradigm': TrainingParadigm.BEST_RESPONSE,
+            'matchup': 'Champion.RyuVsRyu.2Player.align',
+            'name': 'best_response',
+            'seeds': [42],
+            'config': 'medium',
+        },
+    ],
+    'priority_3': [
+        # League training (if time permits)
+        {
+            'paradigm': TrainingParadigm.LEAGUE_FSP,
+            'matchup': 'Champion.RyuVsRyu.2Player.align',
+            'name': 'fsp_league',
+            'seeds': [42],
+            'config': 'short',  # Shorter for time constraints
+        },
+    ],
 }
 
 # Default config for experiments
@@ -173,8 +257,8 @@ class ExperimentConfig:
 
 def generate_experiment_matrix(
     config_name: str = DEFAULT_CONFIG,
-    matchups: List[str] = None,
-    seeds: List[int] = None,
+    matchups: Optional[List[str]] = None,
+    seeds: Optional[List[int]] = None,
     base_dir: str = "experiments_output"
 ) -> List[ExperimentConfig]:
     """
@@ -190,7 +274,7 @@ def generate_experiment_matrix(
         List of ExperimentConfig objects
     """
     if matchups is None:
-        matchups = MATCHUPS
+        matchups = MATCHUPS_VS_CPU
     if seeds is None:
         seeds = SEEDS
     
