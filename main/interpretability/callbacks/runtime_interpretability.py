@@ -157,32 +157,44 @@ class RuntimeInterpretabilityCallback(BaseCallback):
         infos = self.locals.get('infos', [])
         actions = self.locals.get('actions', [])
         
+        # Debug: print buffer size periodically
+        if self.num_timesteps % 5000 == 0 and self.verbose >= 1:
+            print(f"[RuntimeInterp] Step {self.num_timesteps}, buffer size: {len(self.buffer)}")
+        
         if infos and self._last_activation is not None:
             for i, info in enumerate(infos):
+                # Skip if info doesn't have required fields
+                if not isinstance(info, dict) or 'agent_hp' not in info:
+                    continue
+                    
                 # Extract features from the info dict (RAM values)
                 features = self.ground_truth_extractor.extract_from_info(info)
                 
                 # Get activation for this env (handle batch dimension)
-                if len(self._last_activation.shape) > 1:
+                if len(self._last_activation.shape) > 1 and i < len(self._last_activation):
                     activation = self._last_activation[i].flatten()
                 else:
                     activation = self._last_activation.flatten()
                 
                 # Get action
-                action = actions[i] if i < len(actions) else 0
-                if isinstance(action, np.ndarray):
-                    action = int(action.flatten()[0]) if action.size > 0 else 0
+                if i < len(actions):
+                    action = actions[i]
+                    if isinstance(action, np.ndarray):
+                        action = int(action.flatten()[0]) if action.size > 0 else 0
+                    else:
+                        action = int(action)
+                else:
+                    action = 0
                 
                 # Add to buffer
                 self.buffer.add(activation, action, features)
         
-        # Periodic logging
-        if self.n_calls % self.log_frequency == 0 and self.verbose >= 2:
-            print(f"[RuntimeInterp] Step {self.num_timesteps}, buffer size: {len(self.buffer)}")
-        
-        # Periodic analysis
-        if self.n_calls % self.analysis_frequency == 0 and len(self.buffer) >= 1000:
-            self._run_analysis()
+        # Periodic analysis based on num_timesteps
+        if self.num_timesteps > 0 and self.num_timesteps % self.analysis_frequency == 0:
+            if len(self.buffer) >= 100:
+                self._run_analysis()
+            elif self.verbose >= 1:
+                print(f"[RuntimeInterp] Step {self.num_timesteps}: buffer too small ({len(self.buffer)}), skipping analysis")
         
         return True
     
