@@ -5,7 +5,7 @@ import multiprocessing
 multiprocessing.set_start_method('forkserver', force=True)
 from multiprocessing import Process
 
-import retro
+import stable_retro as retro
 
 from common.const import *
 from common.utils import SubprocVecEnv2P, VecTransposeImage2P
