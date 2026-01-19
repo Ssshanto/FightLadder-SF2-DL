@@ -74,7 +74,7 @@ def evaluate(args, model=None, left_model=None, right_model=None, greedy=0.99, r
 
         done = False
         
-        obs = env.reset()
+        obs, info = env.reset()
         if record:
             base_env = env
             while hasattr(base_env, 'env'):
