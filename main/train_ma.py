@@ -17,7 +17,7 @@ from common.league import PayoffManager, League, FSPLeague, PSROLeague, Learner
 STATE = "Champion.RyuVsRyu.2Player.align"
 
 
-def make_env(game, state, side, reset_type, rendering, init_level=1, state_dir=None, verbose=False, enable_combo=True, null_combo=False, transform_action=False, seed=0):
+def make_env(game, state, side, reset_type, rendering, init_level=1, state_dir=None, verbose=False, enable_combo=True, null_combo=False, transform_action=False, seed=0, render_mode=None):
     def _init():
         players = 2
         env = retro.make(
@@ -25,7 +25,8 @@ def make_env(game, state, side, reset_type, rendering, init_level=1, state_dir=N
             state=state, 
             use_restricted_actions=retro.Actions.FILTERED,
             obs_type=retro.Observations.IMAGE,
-            players=players
+            players=players,
+            render_mode=render_mode
         )
         env = SFWrapper(env, side=side, rendering=rendering, reset_type=reset_type, init_level=init_level, state_dir=state_dir, verbose=verbose, enable_combo=enable_combo, null_combo=null_combo, transform_action=transform_action)
         env = Monitor2P(env)
@@ -51,7 +52,8 @@ def restore_worker(idx, learner, total_steps, rollout_opponent_num):
 
 def constructor(args, side, log_name=None, single_env=False):
     num_env = 1 if single_env else args.num_env
-    env = [make_env(sf_game, state=STATE, side=args.side, reset_type=args.reset, rendering=args.render, enable_combo=args.enable_combo, null_combo=args.null_combo, transform_action=args.transform_action, seed=i) for i in range(num_env)]
+    render_mode = "rgb_array" if args.render else None
+    env = [make_env(sf_game, state=STATE, side=args.side, reset_type=args.reset, rendering=args.render, enable_combo=args.enable_combo, null_combo=args.null_combo, transform_action=args.transform_action, seed=i, render_mode=render_mode) for i in range(num_env)]
     env = VecTransposeImage2P(SubprocVecEnv2P(env))
     return LeaguePPO(
         side,
